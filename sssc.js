@@ -14,6 +14,7 @@ if (!fs.existsSync(SESSION_DIR)) {
 }
 
 const map = {};
+const lastMsg = {};
 
 callSlackMethod('rtm.start', (data) => {
   if (data.ok === false) {
@@ -57,19 +58,38 @@ callSlackMethod('rtm.start', (data) => {
     let message = JSON.parse(rawMessage);
 
     if (message.type === 'message') {
+      if (message.subtype === 'message_deleted') {
+        return;
+      }
+
       if (message.subtype === 'message_changed') {
         const sub = message.message;
 
-        sub.text = '(*) ' + sub.text;
+        if (lastMsg[sub.user] === sub.text) {
+          return;
+        }
+
+        sub.text = sub.text;
         sub.channel = message.channel;
+        sub.isEdit = true;
 
         message = sub;
       }
 
-      fs.appendFileSync(
-        `${SESSION_DIR}/${teamName}/${map[message.channel]}/out`,
-        `${message.ts} <${map[message.user]}> ${message.text}\n`,
-      );
+      if (message.text === '' || message.text === undefined) {
+        return;
+      };
+
+      message.text
+        .split('\n')
+        .forEach(line => {
+          fs.appendFileSync(
+            `${SESSION_DIR}/${teamName}/${map[message.channel]}/out`,
+            `${message.ts} <${map[message.user]}> ${message.isEdit ? '(*) ' : ''}${line}\n`,
+          );
+        });
+
+      lastMsg[message.user] = message.text;
 
       return;
     }
@@ -87,6 +107,7 @@ callSlackMethod('rtm.start', (data) => {
       );
 
       delete sendBuffer[message.reply_to];
+      lastMsg[message.user] = message.text;
 
       return;
     }
