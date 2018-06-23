@@ -14,6 +14,7 @@ if (!fs.existsSync(SESSION_DIR)) {
 }
 
 const map = {};
+const presenceMap = {};
 const lastMsg = {};
 
 callSlackMethod('rtm.start', (data) => {
@@ -37,11 +38,17 @@ callSlackMethod('rtm.start', (data) => {
     map[data.users[i].id] = data.users[i].name;
   }
 
+  const presenceSubs = [data.self.id];
+
   const chats = [].concat(
     data.channels,
     data.groups,
     data.ims.map(im => {
       im.name = map[im.user];
+
+      if (im.is_open) {
+        presenceSubs.push(im.user);
+      }
 
       return im;
     }),
@@ -56,6 +63,24 @@ callSlackMethod('rtm.start', (data) => {
 
   socket.on('message', (rawMessage) => {
     let message = JSON.parse(rawMessage);
+
+    if (message.type === 'hello') {
+      socket.send(JSON.stringify({type: 'presence_query', ids: presenceSubs}));
+      socket.send(JSON.stringify({type: 'presence_sub', ids: presenceSubs}));
+    }
+
+    if (message.type === 'presence_change') {
+      presenceMap[message.user] = message.presence;
+
+      fs.writeFileSync(
+        `${SESSION_DIR}/${teamName}/user_presence`,
+        Object.keys(presenceMap).reduce((agg, id) => {
+          agg += `${map[id]} ${presenceMap[id]}\n`;
+
+          return agg;
+        }, ''),
+      );
+    }
 
     if (message.type === 'message') {
       if (message.subtype === 'message_deleted') {
