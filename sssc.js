@@ -13,8 +13,12 @@ if (!fs.existsSync(SESSION_DIR)) {
   fs.mkdirSync(SESSION_DIR);
 }
 
-const map = {};
-const presenceMap = {};
+const inputBufferSize = 1024;
+
+const mapIdToName = {};
+const mapIdToFd = {};
+const mapIdToPresence = {};
+
 const lastMsg = {};
 
 callSlackMethod('rtm.start', (data) => {
@@ -31,11 +35,11 @@ callSlackMethod('rtm.start', (data) => {
     fs.mkdirSync(`${SESSION_DIR}/${teamName}`);
   }
 
-  map[data.self.id] = data.self.name;
-  map[data.team.id] = teamName;
+  mapIdToName[data.self.id] = data.self.name;
+  mapIdToName[data.team.id] = teamName;
 
   for (let i = 0; i < data.users.length; i++) {
-    map[data.users[i].id] = data.users[i].name;
+    mapIdToName[data.users[i].id] = data.users[i].name;
   }
 
   const presenceSubs = [data.self.id];
@@ -44,7 +48,7 @@ callSlackMethod('rtm.start', (data) => {
     data.channels,
     data.groups,
     data.ims.map(im => {
-      im.name = map[im.user];
+      im.name = mapIdToName[im.user];
 
       if (im.is_open) {
         presenceSubs.push(im.user);
@@ -61,8 +65,35 @@ callSlackMethod('rtm.start', (data) => {
     setupChat(socket, sendBuffer, teamName, chats[i]);
   }
 
+  setInterval(() => {
+    Object.keys(mapIdToFd).map(slackId => {
+      const fd = mapIdToFd[slackId];
+
+      fs.read(fd, Buffer.alloc(inputBufferSize), 0, inputBufferSize, null, (error, size, buffer) => {
+        if (size > 0) {
+          const id = Date.now();
+
+          // remove trailing newlines
+          if (size < inputBufferSize) {
+            while (size > 0 && buffer[size - 1] === 10) {
+              --size;
+            }
+          }
+
+          const text = buffer.slice(0, size).toString();
+
+          socket.send(JSON.stringify({id, channel: slackId, type: 'message', text}));
+
+          sendBuffer[String(id)] = slackId;
+        }
+      });
+    });
+  }, 128);
+
   socket.on('message', (rawMessage) => {
     let message = JSON.parse(rawMessage);
+
+    process.stdout.write(JSON.stringify(message, null, 2));
 
     if (message.type === 'hello') {
       socket.send(JSON.stringify({type: 'presence_query', ids: presenceSubs}));
@@ -70,12 +101,12 @@ callSlackMethod('rtm.start', (data) => {
     }
 
     if (message.type === 'presence_change') {
-      presenceMap[message.user] = message.presence;
+      mapIdToPresence[message.user] = message.presence;
 
       fs.writeFileSync(
         `${SESSION_DIR}/${teamName}/user_presence`,
-        Object.keys(presenceMap).reduce((agg, id) => {
-          agg += `${map[id]} ${presenceMap[id]}\n`;
+        Object.keys(mapIdToPresence).reduce((agg, id) => {
+          agg += `${mapIdToName[id]} ${mapIdToPresence[id]}\n`;
 
           return agg;
         }, ''),
@@ -109,8 +140,8 @@ callSlackMethod('rtm.start', (data) => {
         .split('\n')
         .forEach(line => {
           fs.appendFileSync(
-            `${SESSION_DIR}/${teamName}/${map[message.channel]}/out`,
-            `${message.ts} <${map[message.user]}> ${message.isEdit ? '(*) ' : ''}${line}\n`,
+            `${SESSION_DIR}/${teamName}/${mapIdToName[message.channel]}/out`,
+            `${message.ts} <${mapIdToName[message.user]}> ${message.isEdit ? '(*) ' : ''}${line}\n`,
           );
         });
 
@@ -127,7 +158,7 @@ callSlackMethod('rtm.start', (data) => {
 
     if (sendBuffer[message.reply_to] !== undefined && message.ok === true) {
       fs.appendFileSync(
-        `${SESSION_DIR}/${teamName}/${map[sendBuffer[message.reply_to]]}/out`,
+        `${SESSION_DIR}/${teamName}/${mapIdToName[sendBuffer[message.reply_to]]}/out`,
         `${message.ts} <${userName}> ${message.text}\n`,
       );
 
@@ -137,12 +168,12 @@ callSlackMethod('rtm.start', (data) => {
       return;
     }
 
-    process.stdout.write(JSON.stringify(message, null, 2));
+    //process.stdout.write(JSON.stringify(message, null, 2));
   });
 });
 
 function setupChat(socket, sendBuffer, teamName, chat) {
-  map[chat.id] = chat.name;
+  mapIdToName[chat.id] = chat.name;
 
   if (!fs.existsSync(`${SESSION_DIR}/${teamName}/${chat.name}`)) {
     fs.mkdirSync(`${SESSION_DIR}/${teamName}/${chat.name}`);
@@ -153,28 +184,7 @@ function setupChat(socket, sendBuffer, teamName, chat) {
   const inFifo = `${SESSION_DIR}/${teamName}/${chat.name}/in`;
   const fd = fs.openSync(inFifo, C.O_RDONLY | C.O_NONBLOCK);
 
-  setInterval(() => {
-    const allocSize = 1024;
-
-    fs.read(fd, Buffer.alloc(allocSize), 0, allocSize, null, (error, size, buffer) => {
-      if (size > 0) {
-        const id = Date.now();
-
-        // remove trailing newlines
-        if (size < allocSize) {
-          while (size > 0 && buffer[size - 1] === 10) {
-            --size;
-          }
-        }
-
-        const text = buffer.slice(0, size).toString();
-
-        socket.send(JSON.stringify({id, channel: chat.id, type: 'message', text}));
-
-        sendBuffer[String(id)] = chat.id;
-      }
-    });
-  }, 128);
+  mapIdToFd[chat.id] = fd;
 }
 
 function callSlackMethod(apiMethod, callback = (...args) => {}, params = {}) {
