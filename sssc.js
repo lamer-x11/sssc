@@ -14,12 +14,15 @@ if (!fs.existsSync(SESSION_DIR)) {
 }
 
 const inputBufferSize = 1024;
+const pingInterval = 30000;
+const pongMaxResponseTime = 6000;
 
 const mapIdToName = {};
 const mapIdToFd = {};
 const mapIdToPresence = {};
 
 const lastMsg = {};
+let pongTimeout;
 
 callSlackMethod('rtm.start', (data) => {
   if (data.ok === false) {
@@ -65,8 +68,8 @@ callSlackMethod('rtm.start', (data) => {
     setupChat(socket, sendBuffer, teamName, chats[i]);
   }
 
-  setInterval(() => {
-    Object.keys(mapIdToFd).map(slackId => {
+  inputProcessInterval = setInterval(() => {
+    Object.keys(mapIdToFd).forEach(slackId => {
       const fd = mapIdToFd[slackId];
 
       fs.read(fd, Buffer.alloc(inputBufferSize), 0, inputBufferSize, null, (error, size, buffer) => {
@@ -90,10 +93,23 @@ callSlackMethod('rtm.start', (data) => {
     });
   }, 128);
 
+  socket.on('open', () => {
+    console.log('::: connection stablished');
+
+    ping(socket);
+
+    socket.on('pong', () => {
+      clearTimeout(pongTimeout);
+      ping(socket);
+    })
+  });
+
   socket.on('message', (rawMessage) => {
     let message = JSON.parse(rawMessage);
 
-    process.stdout.write(JSON.stringify(message, null, 2));
+    if (process.env.STDOUT_DUMP !== undefined) {
+      process.stdout.write(JSON.stringify(message, null, 2));
+    }
 
     if (message.type === 'hello') {
       socket.send(JSON.stringify({type: 'presence_query', ids: presenceSubs}));
@@ -167,8 +183,6 @@ callSlackMethod('rtm.start', (data) => {
 
       return;
     }
-
-    //process.stdout.write(JSON.stringify(message, null, 2));
   });
 });
 
@@ -204,4 +218,20 @@ function callSlackMethod(apiMethod, callback = (...args) => {}, params = {}) {
       callback(data, response);
     }
   );
+}
+
+function ping(socket) {
+  setTimeout(() => {
+    socket.ping();
+
+    pongTimeout = setTimeout(() => {
+      console.log('::: ping timeout, shutting down...');
+
+      clearInterval(inputProcessInterval);
+      socket.terminate();
+      Object.values(mapIdToFd).forEach(fs.closeSync);
+
+      process.exit(1);
+    }, pongMaxResponseTime);
+  }, pingInterval);
 }
